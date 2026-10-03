@@ -47,3 +47,4 @@ scripts/__pycache__/
 
 # Playwright browsers (large binaries)
 .playwright-browsers/
+.venv/

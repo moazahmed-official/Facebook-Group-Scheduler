@@ -3,7 +3,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { chromium } from 'playwright';
 
-const FEED_URL = 'https://www.facebook.com/';
+const FEED_URL = process.env.FACEBOOK_PAGE_URL || 'https://www.facebook.com/';
 
 const DEBUG_ATTEMPT_DIR = process.env.FACEBOOK_DEBUG_ATTEMPT_DIR
   ? path.resolve(process.env.FACEBOOK_DEBUG_ATTEMPT_DIR)
@@ -14,6 +14,7 @@ let activePage = null;
 function parseArgs(argv) {
   const options = {
     file: null,
+    image: null,
     storageState: null,
     headless: false,
   };
@@ -23,6 +24,9 @@ function parseArgs(argv) {
     switch (arg) {
       case '--storage-state':
         options.storageState = path.resolve(process.cwd(), argv[++i]);
+        break;
+      case '--image':
+        options.image = path.resolve(process.cwd(), argv[++i]);
         break;
       case '--headless':
         options.headless = true;
@@ -64,13 +68,33 @@ async function saveDebugScreenshot(page, filename) {
   }
 }
 
-async function openComposer(page) {
-  await page.goto(FEED_URL, { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(3000);
+async function switchToPageProfile(page) {
+  // When posting as a Page, switch into the Page profile if Facebook offers it
+  const switchButton = page.locator('[role="button"]').filter({
+    hasText: /^(Switch now|Switch|تبديل الآن)$/,
+  }).first();
+  if (await switchButton.count()) {
+    await switchButton.click();
+    await page.waitForTimeout(6000);
+  }
+}
 
-  // Click composer trigger — "What's on your mind?" (EN) / "Что у вас нового" (RU)
+async function openComposer(page) {
+  const groupUrl = process.env.FACEBOOK_GROUP_URL;
+  const pageUrl = process.env.FACEBOOK_PAGE_URL;
+
+  if (pageUrl) {
+    await page.goto(pageUrl, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(3000);
+    await switchToPageProfile(page);
+  }
+
+  await page.goto(groupUrl || pageUrl || FEED_URL, { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(5000);
+
+  // Click composer trigger — "What's on your mind?" (EN) / "Что у вас нового" (RU) / "اكتب شيئًا" (AR group)
   const composerTrigger = page.locator('[role="button"]').filter({
-    hasText: /What.s on your mind|Что у вас нового/,
+    hasText: /What.s on your mind|Write something|Create post|Что у вас нового|بم تفكر|اكتب شيئًا|إنشاء منشور/,
   });
   await composerTrigger.first().click();
 
@@ -78,8 +102,20 @@ async function openComposer(page) {
   await page.waitForSelector('div[role="textbox"][contenteditable="true"]', { timeout: 15000 });
 }
 
+async function attachImage(page, imagePath) {
+  const trigger = page.locator(
+    '[role="button"][aria-label="صورة/فيديو"], [role="button"][aria-label="Photo/video"]',
+  ).first();
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser', { timeout: 15000 }),
+    trigger.click(),
+  ]);
+  await chooser.setFiles(imagePath);
+  await page.waitForTimeout(8000);
+}
+
 async function fillPost(page, text) {
-  const editor = page.locator('div[role="textbox"][contenteditable="true"]').first();
+  const editor = page.locator('div[role="dialog"] div[role="textbox"][contenteditable="true"]').first();
   await editor.click();
   await editor.fill(text);
   await page.waitForTimeout(500);
@@ -88,14 +124,16 @@ async function fillPost(page, text) {
 async function submitPost(page) {
   // Step 1: Click "Next" (EN) / "Далее" (RU)
   const nextButton = page.locator('div[role="dialog"] [role="button"]').filter({
-    hasText: /^(Next|Далее)$/,
+    hasText: /^(Next|Далее|التالي)$/,
   }).first();
-  await nextButton.click();
-  await page.waitForTimeout(2000);
+  if (await nextButton.count()) {
+    await nextButton.click();
+    await page.waitForTimeout(2000);
+  }
 
   // Step 2: Click "Post" (EN) / "Опубликовать" (RU)
   const postButton = page.locator('div[role="dialog"] [role="button"][aria-label]').filter({
-    hasText: /^(Post|Опубликовать)$/,
+    hasText: /^(Post|Опубликовать|نشر)$/,
   }).first();
   await postButton.click();
 
@@ -115,7 +153,7 @@ async function main() {
     throw new Error(`Text file is empty: ${options.file}`);
   }
 
-  const browser = await chromium.launch({ headless: options.headless });
+  const browser = await chromium.launch({ channel: process.env.FACEBOOK_BROWSER_CHANNEL || undefined, headless: options.headless });
   const context = await browser.newContext({
     storageState: options.storageState,
     viewport: { width: 1440, height: 980 },
@@ -126,7 +164,14 @@ async function main() {
   try {
     await openComposer(page);
     await fillPost(page, text);
+    if (options.image) {
+      await attachImage(page, options.image);
+    }
     await saveDebugScreenshot(page, 'before-submit.png');
+    if (process.env.FACEBOOK_STOP_BEFORE_SUBMIT === '1') {
+      console.log(JSON.stringify({ file: options.file, status: 'stopped-before-submit' }, null, 2));
+      return;
+    }
     await submitPost(page);
     await saveDebugScreenshot(page, 'after-submit.png');
   } catch (error) {

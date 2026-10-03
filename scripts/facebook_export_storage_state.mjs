@@ -34,6 +34,7 @@ async function main() {
   await fs.mkdir(path.dirname(options.output), { recursive: true });
 
   const browser = await chromium.launch({
+    channel: process.env.FACEBOOK_BROWSER_CHANNEL || undefined,
     headless: false,
   });
 

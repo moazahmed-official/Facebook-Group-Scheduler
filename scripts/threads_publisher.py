@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import atexit
-import fcntl
 import hashlib
 import http.server
 import json
@@ -1098,6 +1097,22 @@ def publish_text_file(
     raise RuntimeError(f"Unsupported publish backend: {backend}")
 
 
+if os.name == "nt":
+    import msvcrt
+
+    def _try_lock(handle) -> None:
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            raise BlockingIOError(str(exc)) from exc
+else:
+    import fcntl
+
+    def _try_lock(handle) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 @contextmanager
 def lock_file(path: Path, debug_state: DebugState | None = None):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1105,7 +1120,7 @@ def lock_file(path: Path, debug_state: DebugState | None = None):
         handle.seek(0)
         existing_metadata = handle.read().strip()
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _try_lock(handle)
         except BlockingIOError as exc:
             if debug_state:
                 debug_state.log(
